@@ -1,0 +1,59 @@
+{
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": "orbital-chess",
+  "post": {
+    "dir": "dist/client",
+    "entrypoints": {
+      "default": {
+        "inline": true,
+        "entry": "splash.html"
+      },
+      "game": {
+        "entry": "game.html"
+      }
+    }
+  },
+  "server": {
+    "dir": "dist/server",
+    "entry": "index.cjs"
+  },
+  "menu": {
+    "items": [
+      {
+        "label": "Orbital Chess: create post",
+        "description": "Create a new Orbital Chess post",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/post-create"
+      },
+      {
+        "label": "Orbital Chess: seed demo data",
+        "description": "Add fake games and players (includes you in some games)",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/seed"
+      },
+      {
+        "label": "Orbital Chess: simulate bot moves",
+        "description": "Fake players make 40 moves on open boards",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/simulate"
+      },
+      {
+        "label": "Orbital Chess: reset all data",
+        "description": "Delete every game and stat",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/reset"
+      }
+    ]
+  },
+  "triggers": {
+    "onAppInstall": "/internal/triggers/on-app-install"
+  },
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build"
+  }
+}

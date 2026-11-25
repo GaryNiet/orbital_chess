@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "../dist/types/local",
+    "tsBuildInfoFile": "../dist/types/local/tsconfig.tsbuildinfo",
+    "types": ["node"],
+    "exactOptionalPropertyTypes": false,
+    "rootDir": ".."
+  },
+  "include": ["../tools/local/**/*.ts", "../src/server/**/*.ts", "../src/shared/**/*.ts"],
+  "exclude": []
+}

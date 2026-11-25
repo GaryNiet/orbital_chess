@@ -1,0 +1,71 @@
+@import 'tailwindcss';
+
+:root {
+  --sq-light: #e8e6f2;
+  --sq-dark: #8a83b8;
+  --accent: #ff4500;
+  color-scheme: light dark;
+}
+
+html,
+body {
+  margin: 0;
+  background: #f6f7f9;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sq-light: #c9c4e0;
+    --sq-dark: #6b639c;
+  }
+  html,
+  body {
+    background: #0e1113;
+  }
+}
+
+.sq-light {
+  background: var(--sq-light);
+}
+.sq-dark {
+  background: var(--sq-dark);
+}
+.coord-on-light {
+  color: var(--sq-dark);
+}
+.coord-on-dark {
+  color: var(--sq-light);
+}
+.sq-last {
+  background: rgba(255, 196, 0, 0.42);
+}
+.sq-selected {
+  background: rgba(255, 69, 0, 0.45);
+}
+.sq-check {
+  background: radial-gradient(circle, rgba(255, 0, 0, 0.85) 0%, rgba(255, 0, 0, 0) 75%);
+}
+.sq-mine {
+  box-shadow: inset 0 0 0 3px #ff4500;
+}
+
+.piece {
+  font-family: 'Segoe UI Symbol', 'DejaVu Sans', 'Noto Sans Symbols 2', 'Apple Symbols', serif;
+  font-variant-emoji: text;
+  display: inline-block;
+  transform: translateY(-3%);
+}
+.piece-white {
+  color: #ffffff;
+  -webkit-text-stroke: 1.2px #222;
+  paint-order: stroke fill;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+}
+.piece-black {
+  color: #1d1b26;
+  -webkit-text-stroke: 0.6px #000;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.25);
+}

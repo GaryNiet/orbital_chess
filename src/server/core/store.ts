@@ -19,7 +19,9 @@ export type Store = {
   hGetAll(key: string): Promise<Record<string, string>>;
   hIncrBy(key: string, field: string, value: number): Promise<number>;
   hSetNX(key: string, field: string, value: string): Promise<number>;
+  hMGet(key: string, fields: string[]): Promise<(string | null)[]>;
   zAdd(key: string, ...members: ZMember[]): Promise<number>;
+  zIncrBy(key: string, member: string, value: number): Promise<number>;
   zRange(
     key: string,
     start: number | string,
@@ -125,6 +127,18 @@ export class MemoryStore implements Store {
     if (h.has(field)) return 0;
     h.set(field, value);
     return 1;
+  }
+
+  async hMGet(key: string, fields: string[]) {
+    const e = this.live(key);
+    return fields.map((f) => (e?.kind === 'hash' ? (e.value.get(f) ?? null) : null));
+  }
+
+  async zIncrBy(key: string, member: string, value: number) {
+    const z = this.zset(key);
+    const next = (z.get(member) ?? 0) + value;
+    z.set(member, next);
+    return next;
   }
 
   async zAdd(key: string, ...members: ZMember[]) {

@@ -4,21 +4,25 @@ import { StrictMode, useCallback, useEffect, useMemo, useState, type ReactNode }
 import { createRoot } from 'react-dom/client';
 import { Chess } from 'chess.js';
 import type {
+  ArchiveDay,
   Color,
-  GameView,
-  HistoryEntry,
+  DayTreeResponse,
+  HistoryDay,
   LeaderboardResponse,
   MeResponse,
-  MoveRecord,
-  NextGameResponse,
+  MoveResponse,
+  Outcome,
+  ServedPosition,
   Stats,
+  TreeNode,
 } from '../shared/api';
+import { colorOfPly, isAncestorOrSelf, ROOT_ID, totalLines, winRateFor } from '../shared/api';
 import { api } from './api';
 import { Board, type BoardMove } from './components/Board';
-import { isLocal, openExternal } from './platform';
-import { describeEnd, formatRate, moveLabel, timeAgo, toPgn } from './format';
+import { isLocal } from './platform';
+import { describeResult, formatDay, formatDuration, formatRate, moveLabel } from './format';
 
-type Tab = 'play' | 'history' | 'leaders' | 'tools';
+type Tab = 'play' | 'days' | 'leaders' | 'tools';
 
 // ---------------------------------------------------------------------------
 // Small UI pieces
@@ -61,29 +65,22 @@ const Card = ({ children, className = '' }: { children: ReactNode; className?: s
   </div>
 );
 
-const ColorDot = ({ color }: { color: Color }) => (
-  <span
-    className={`inline-block w-3 h-3 rounded-full ring-1 ring-zinc-500 align-middle ${color === 'w' ? 'bg-white' : 'bg-zinc-900'}`}
-  />
+const Muted = ({ children }: { children: ReactNode }) => (
+  <Card className="text-center text-zinc-500 py-12">{children}</Card>
 );
 
-const OutcomeBadge = ({ outcome }: { outcome: HistoryEntry['outcome'] }) => {
-  const map = {
-    win: ['Win', 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300'],
-    loss: ['Loss', 'bg-rose-100 text-rose-800 dark:bg-rose-900/50 dark:text-rose-300'],
-    draw: ['Draw', 'bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200'],
-    pending: ['In play', 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'],
-  } as const;
-  const [label, cls] = map[outcome ?? 'pending'];
-  return <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${cls}`}>{label}</span>;
-};
+const ColorDot = ({ color }: { color: Color }) => (
+  <span
+    className={`inline-block w-3 h-3 shrink-0 rounded-full ring-1 ring-zinc-500 align-middle ${color === 'w' ? 'bg-white' : 'bg-zinc-900'}`}
+  />
+);
 
 const StatsBar = ({ stats }: { stats: Stats }) => (
   <div className="grid grid-cols-4 gap-2 text-center">
     {[
       ['Win rate', formatRate(stats.winRate)],
-      ['W / D / L', `${stats.wins} / ${stats.draws} / ${stats.losses}`],
-      ['Waiting', String(stats.pending)],
+      ['Scored moves', String(stats.moves)],
+      ['Today', String(stats.pending)],
       ['Rank', stats.rank ? `#${stats.rank}` : '—'],
     ].map(([k, v]) => (
       <div key={k} className="rounded-lg bg-zinc-100 dark:bg-zinc-800/70 py-2">
@@ -94,6 +91,21 @@ const StatsBar = ({ stats }: { stats: Stats }) => (
   </div>
 );
 
+/** White / draw / black share of the lines under a move. */
+const OutcomeBar = ({ out }: { out: Outcome }) => {
+  const t = totalLines(out) || 1;
+  return (
+    <div
+      className="flex h-2 w-full rounded-full overflow-hidden ring-1 ring-black/10"
+      title={`White ${out.w} · Draw ${out.d} · Black ${out.b}`}
+    >
+      <div className="bg-zinc-50" style={{ width: `${(out.w / t) * 100}%` }} />
+      <div className="bg-zinc-400" style={{ width: `${(out.d / t) * 100}%` }} />
+      <div className="bg-zinc-900" style={{ width: `${(out.b / t) * 100}%` }} />
+    </div>
+  );
+};
+
 const useToast = () => {
   const [msg, setMsg] = useState<string | null>(null);
   useEffect(() => {
@@ -102,65 +114,73 @@ const useToast = () => {
     return () => clearTimeout(t);
   }, [msg]);
   const node = msg ? (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-zinc-900 text-white text-sm px-4 py-2 rounded-full shadow-lg dark:bg-white dark:text-zinc-900">
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 max-w-[90vw] bg-zinc-900 text-white text-sm px-4 py-2 rounded-full shadow-lg dark:bg-white dark:text-zinc-900">
       {msg}
     </div>
   ) : null;
   return [node, setMsg] as const;
 };
 
-const lastMoveOf = (moves: MoveRecord[]) => {
-  const m = moves[moves.length - 1];
-  return m ? { from: m.uci.slice(0, 2), to: m.uci.slice(2, 4) } : null;
+/** Offset between the server's game clock and this device's clock. */
+let clockSkew = 0;
+const gameNow = () => Date.now() + clockSkew;
+
+const useNow = (everyMs = 30_000) => {
+  const [now, setNow] = useState(gameNow);
+  useEffect(() => {
+    const t = setInterval(() => setNow(gameNow()), everyMs);
+    return () => clearInterval(t);
+  }, [everyMs]);
+  return now;
 };
 
-const MoveList = ({
-  moves,
-  current,
-  mine,
+/** Opening moves (dimmed) followed by the community's moves. */
+const LineView = ({
+  opening,
+  line,
   onSelect,
+  current,
 }: {
-  moves: MoveRecord[];
+  opening: string[];
+  line: { san: string; key: string }[];
+  onSelect?: (index: number) => void;
   current?: number;
-  mine?: number | null;
-  onSelect?: (ply: number) => void;
 }) => {
-  const rows: { n: number; w?: MoveRecord; b?: MoveRecord }[] = [];
-  for (const m of moves) {
-    const n = Math.ceil(m.ply / 2);
-    if (m.ply % 2 === 1) rows.push({ n, w: m });
-    else if (rows.length && rows[rows.length - 1]!.n === n) rows[rows.length - 1]!.b = m;
-    else rows.push({ n, b: m });
-  }
-  const cell = (m?: MoveRecord) =>
-    m ? (
-      <button
-        type="button"
-        onClick={() => onSelect?.(m.ply)}
-        title={`u/${m.user}`}
-        className={[
-          'text-left px-1.5 py-0.5 rounded font-mono text-sm cursor-pointer',
-          m.ply === current ? 'bg-[#ff4500]/20' : 'hover:bg-zinc-100 dark:hover:bg-zinc-800',
-          m.ply === mine ? 'font-bold text-[#ff4500]' : 'text-zinc-800 dark:text-zinc-200',
-        ].join(' ')}
-      >
-        {m.san}
-      </button>
-    ) : (
-      <span className="px-1.5 text-zinc-400">…</span>
-    );
-  if (!moves.length) return <p className="text-sm text-zinc-500">No moves yet — you open the game.</p>;
+  const all = [...opening.map((san) => ({ san, key: '', open: true })), ...line.map((m) => ({ ...m, open: false }))];
   return (
-    <div className="max-h-40 overflow-y-auto grid grid-cols-[2.2rem_1fr_1fr] gap-y-0.5 text-sm">
-      {rows.map((r) => (
-        <div key={r.n} className="contents">
-          <span className="text-zinc-400 font-mono py-0.5">{r.n}.</span>
-          {cell(r.w)}
-          {cell(r.b)}
-        </div>
-      ))}
+    <div className="flex flex-wrap gap-x-1 gap-y-0.5 font-mono text-sm leading-6">
+      {all.map((m, i) => {
+        const ply = i + 1;
+        const lineIdx = i - opening.length;
+        return (
+          <span key={i} className="whitespace-nowrap">
+            {ply % 2 === 1 && <span className="text-zinc-400">{Math.ceil(ply / 2)}.</span>}
+            <button
+              type="button"
+              disabled={m.open || !onSelect}
+              onClick={() => onSelect?.(lineIdx + 1)}
+              className={[
+                'px-1 rounded',
+                m.open ? 'text-zinc-400' : 'text-zinc-900 dark:text-zinc-100',
+                !m.open && onSelect ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800' : '',
+                current !== undefined && lineIdx + 1 === current ? 'bg-[#ff4500]/20' : '',
+              ].join(' ')}
+            >
+              {m.san}
+            </button>
+          </span>
+        );
+      })}
     </div>
   );
+};
+
+const fenAt = (openingSan: string[], nodeId: string) => {
+  const c = new Chess();
+  for (const san of openingSan) c.move(san);
+  for (const uci of nodeId.split('.').slice(1))
+    c.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), ...(uci[4] ? { promotion: uci[4] } : {}) });
+  return c;
 };
 
 // ---------------------------------------------------------------------------
@@ -169,50 +189,50 @@ const MoveList = ({
 
 type PlayState =
   | { kind: 'loading' }
-  | { kind: 'none'; message: string }
-  | { kind: 'board'; res: Extract<NextGameResponse, { type: 'game' }>; pending: BoardMove | null }
-  | { kind: 'done'; game: GameView; color: Color };
+  | { kind: 'none'; message: string; closesAt: number | null }
+  | { kind: 'board'; pos: ServedPosition; pending: BoardMove | null }
+  | { kind: 'done'; pos: ServedPosition; res: Extract<MoveResponse, { type: 'ok' }>; uci: string };
 
-const Countdown = ({ until }: { until: number }) => {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  const s = Math.max(0, Math.round((until - now) / 1000));
-  return (
-    <span className={s < 30 ? 'text-rose-500' : ''}>
-      {Math.floor(s / 60)}:{String(s % 60).padStart(2, '0')}
-    </span>
-  );
+const fetchPosition = async (skip: boolean): Promise<PlayState> => {
+  try {
+    const r = await api.next(skip);
+    return r.type === 'position'
+      ? { kind: 'board', pos: r.position, pending: null }
+      : { kind: 'none', message: r.message, closesAt: r.closesAt };
+  } catch (e) {
+    return { kind: 'none', message: e instanceof Error ? e.message : 'Could not load a position.', closesAt: null };
+  }
 };
 
-const fetchBoard = async (skip: boolean): Promise<PlayState> => {
-  try {
-    const res = await api.next(skip);
-    return res.type === 'game' ? { kind: 'board', res, pending: null } : { kind: 'none', message: res.message };
-  } catch (e) {
-    return { kind: 'none', message: e instanceof Error ? e.message : 'Could not load a board.' };
-  }
+const DayHeader = ({ pos }: { pos: ServedPosition }) => {
+  const now = useNow();
+  return (
+    <div className="text-xs text-zinc-500 flex justify-between gap-2">
+      <span className="truncate">
+        Today: <b className="text-zinc-700 dark:text-zinc-300">{pos.opening.name}</b>
+      </span>
+      <span className="whitespace-nowrap">reveal in {formatDuration(pos.closesAt - now)}</span>
+    </div>
+  );
 };
 
 const PlayTab = ({ onStats, toast }: { onStats: (s: Stats) => void; toast: (m: string) => void }) => {
   const [state, setState] = useState<PlayState>({ kind: 'loading' });
   const [busy, setBusy] = useState(false);
+  const now = useNow();
 
   const load = useCallback(async (skip = false) => {
     setState({ kind: 'loading' });
-    setState(await fetchBoard(skip));
+    setState(await fetchPosition(skip));
   }, []);
 
   useEffect(() => {
-    void fetchBoard(false).then(setState);
+    void fetchPosition(false).then(setState);
   }, []);
 
-  // The position shown on the board, with the not-yet-confirmed move applied.
   const preview = useMemo(() => {
     if (state.kind !== 'board' || !state.pending) return null;
-    const c = new Chess(state.res.game.fen);
+    const c = new Chess(state.pos.fen);
     try {
       const mv = c.move(state.pending);
       return { fen: c.fen(), san: mv.san, uci: `${mv.from}${mv.to}${mv.promotion ?? ''}` };
@@ -221,54 +241,67 @@ const PlayTab = ({ onStats, toast }: { onStats: (s: Stats) => void; toast: (m: s
     }
   }, [state]);
 
-  if (state.kind === 'loading')
-    return <Card className="text-center text-zinc-500 py-16">Finding a board that needs you…</Card>;
+  if (state.kind === 'loading') return <Muted>Finding a position for you…</Muted>;
 
   if (state.kind === 'none')
     return (
-      <Card className="text-center py-12 space-y-4">
+      <Card className="text-center py-10 space-y-4">
         <p className="text-zinc-700 dark:text-zinc-300">{state.message}</p>
+        {state.closesAt && (
+          <p className="text-sm text-zinc-500">
+            Today's tree is revealed in {formatDuration(state.closesAt - now)}.
+          </p>
+        )}
         <Btn onClick={() => void load()}>Try again</Btn>
       </Card>
     );
 
   if (state.kind === 'done') {
-    const { game, color } = state;
-    const mine = game.myMove;
+    const { pos, res, uci } = state;
+    const after = new Chess(pos.fen);
+    after.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), ...(uci[4] ? { promotion: uci[4] } : {}) });
     return (
       <div className="space-y-3">
         <Card className="space-y-1">
           <h2 className="text-lg font-bold text-zinc-900 dark:text-white">
-            {game.status === 'finished' ? describeEnd(game, color) : 'Move played — board passed on!'}
+            You played <span className="font-mono">{moveLabel(res.ply, res.san)}</span>
           </h2>
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            You played <b className="font-mono">{mine ? moveLabel(mine.ply, mine.san) : ''}</b> as{' '}
-            {color === 'w' ? 'White' : 'Black'} in game #{game.id.slice(1)}.{' '}
-            {game.status === 'active' && 'Your win rate updates when this game ends — check "My moves".'}
+            {res.newBranch
+              ? 'Nobody had played that here yet: you started a new branch.'
+              : 'Someone else had already played that here, so your move joined their branch.'}{' '}
+            {res.ended
+              ? `${describeResult(res.ended.result, res.ended.reason)}. That line is finished.`
+              : 'Other players will continue from here.'}
+          </p>
+          <p className="text-sm text-zinc-500">
+            Your win rate for this move is revealed with the whole tree in {formatDuration(pos.closesAt - now)}.
           </p>
         </Card>
-        <Board fen={game.fen} orientation={color} lastMove={lastMoveOf(game.moves)} />
+        <Board
+          fen={after.fen()}
+          orientation={pos.color}
+          lastMove={{ from: uci.slice(0, 2), to: uci.slice(2, 4) }}
+        />
         <Btn className="w-full" onClick={() => void load()}>
-          Play the next board →
+          Next position →
         </Btn>
       </div>
     );
   }
 
-  const { res, pending } = state;
-  const { game, color } = res;
-  const ply = game.moves.length;
+  const { pos, pending } = state;
   const submit = async () => {
     if (!preview) return;
     setBusy(true);
     try {
-      const r = await api.move(game.id, ply, preview.uci);
+      const r = await api.move(pos.day, pos.nodeId, preview.uci);
       if (r.type === 'error') {
         toast(r.message);
         await load();
       } else {
         onStats(r.stats);
-        setState({ kind: 'done', game: r.game, color });
+        setState({ kind: 'done', pos, res: r, uci: preview.uci });
       }
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Move failed');
@@ -276,32 +309,34 @@ const PlayTab = ({ onStats, toast }: { onStats: (s: Stats) => void; toast: (m: s
       setBusy(false);
     }
   };
+  const last = pos.line[pos.line.length - 1];
 
   return (
     <div className="space-y-3">
-      <Card className="flex items-center justify-between gap-2 py-3">
-        <div>
+      <Card className="space-y-2 py-3">
+        <DayHeader pos={pos} />
+        <div className="flex items-center justify-between gap-2">
           <div className="font-bold text-zinc-900 dark:text-white flex items-center gap-2">
-            <ColorDot color={color} /> You play {color === 'w' ? 'White' : 'Black'}
+            <ColorDot color={pos.color} /> {pos.color === 'w' ? 'White' : 'Black'} to play · move {Math.ceil(pos.ply / 2)}
           </div>
-          <div className="text-xs text-zinc-500">
-            Game #{game.id.slice(1)} · move {Math.floor(ply / 2) + 1} · {ply} player{ply === 1 ? '' : 's'} so far
-          </div>
-        </div>
-        <div className="text-right text-xs text-zinc-500">
-          Reserved for you
-          <div className="font-mono text-sm text-zinc-800 dark:text-zinc-200">
-            <Countdown until={res.lockExpiresAt} />
+          <div className="text-xs text-zinc-500 text-right whitespace-nowrap">
+            {pos.playedHere === 0 ? 'Fresh position' : `${pos.playedHere} played here`}
           </div>
         </div>
       </Card>
 
       <Board
-        fen={preview?.fen ?? game.fen}
-        orientation={color}
-        interactiveFor={pending ? null : color}
+        fen={preview?.fen ?? pos.fen}
+        orientation={pos.color}
+        interactiveFor={pending ? null : pos.color}
         onPick={(m) => setState({ ...state, pending: m })}
-        lastMove={pending ? { from: pending.from, to: pending.to } : lastMoveOf(game.moves)}
+        lastMove={
+          pending
+            ? { from: pending.from, to: pending.to }
+            : last
+              ? { from: last.uci.slice(0, 2), to: last.uci.slice(2, 4) }
+              : null
+        }
       />
 
       {pending && preview ? (
@@ -310,214 +345,266 @@ const PlayTab = ({ onStats, toast }: { onStats: (s: Stats) => void; toast: (m: s
             Undo
           </Btn>
           <Btn className="flex-[2]" onClick={() => void submit()} disabled={busy}>
-            {busy ? 'Sending…' : `Confirm ${moveLabel(ply + 1, preview.san)}`}
+            {busy ? 'Sending…' : `Confirm ${moveLabel(pos.ply, preview.san)}`}
           </Btn>
         </div>
       ) : (
         <div className="flex items-center justify-between">
-          <p className="text-sm text-zinc-500">Tap a piece, then a square. You only get this one move.</p>
+          <p className="text-sm text-zinc-500">One move here, then this path is closed to you for today.</p>
           <Btn kind="ghost" onClick={() => void load(true)}>
             Skip
           </Btn>
         </div>
       )}
 
-      <Card>
-        <MoveList moves={game.moves} />
+      <Card className="space-y-1">
+        <div className="text-xs text-zinc-500">{pos.opening.name}, then the community:</div>
+        <LineView
+          opening={pos.opening.san}
+          line={pos.line.map((m) => ({ san: m.san, key: m.uci }))}
+        />
       </Card>
     </div>
   );
 };
 
 // ---------------------------------------------------------------------------
-// History tab + game viewer
+// Tree explorer (finished days)
 // ---------------------------------------------------------------------------
 
-const GameViewer = ({ id, onBack, toast }: { id: string; onBack: () => void; toast: (m: string) => void }) => {
-  const [game, setGame] = useState<GameView | null>(null);
+const Explorer = ({ tree, mine, me }: { tree: DayTreeResponse; mine: HistoryDay; me: string }) => {
+  const byId = useMemo(() => new Map(tree.nodes.map((n) => [n.id, n])), [tree]);
+  const children = useMemo(() => {
+    const m = new Map<string, TreeNode[]>();
+    for (const n of tree.nodes)
+      if (n.parent) m.set(n.parent, [...(m.get(n.parent) ?? []), n]);
+    for (const list of m.values()) list.sort((a, b) => totalLines(b.out) - totalLines(a.out));
+    return m;
+  }, [tree]);
+  // Positions where the viewer moved, and the nodes their moves led to.
+  const myChildIds = useMemo(() => new Set(mine.moves.map((m) => `${m.nodeId}.${m.uci}`)), [mine]);
+  const [at, setAt] = useState<string>(mine.moves[0]?.nodeId ?? ROOT_ID);
+
+  const node = byId.get(at) ?? byId.get(ROOT_ID)!;
+  const kids = children.get(node.id) ?? [];
+  const pathIds = node.id.split('.').map((_, i, segs) => segs.slice(0, i + 1).join('.')).slice(1);
+  const path = pathIds.map((id) => byId.get(id)!).filter(Boolean);
+  const orientation: Color = mine.moves[0]?.color ?? 'w';
+  const mover = colorOfPly(node.ply + 1);
+
+  return (
+    <div className="space-y-3">
+      {mine.moves.length > 0 && (
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {mine.moves.map((m) => (
+            <button
+              key={m.nodeId}
+              type="button"
+              onClick={() => setAt(m.nodeId)}
+              className={`shrink-0 rounded-full px-3 py-1 text-sm cursor-pointer ring-1 ${
+                at === m.nodeId
+                  ? 'bg-[#ff4500] text-white ring-[#ff4500]'
+                  : 'bg-white dark:bg-zinc-900 ring-black/10 dark:ring-white/15'
+              }`}
+            >
+              <span className="font-mono font-bold">{moveLabel(m.ply, m.san)}</span>
+              <span className="ml-1.5 opacity-80">{formatRate(m.winRate)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <Board
+        fen={node.fen}
+        orientation={orientation}
+        lastMove={node.uci ? { from: node.uci.slice(0, 2), to: node.uci.slice(2, 4) } : null}
+      />
+
+      <Card className="space-y-2">
+        <div className="flex items-center justify-between">
+          <Btn kind="ghost" className="!px-0 !h-auto" disabled={!node.parent} onClick={() => node.parent && setAt(node.parent)}>
+            ← Back
+          </Btn>
+          <Btn kind="ghost" className="!px-0 !h-auto" disabled={node.id === ROOT_ID} onClick={() => setAt(ROOT_ID)}>
+            Start
+          </Btn>
+        </div>
+        <LineView
+          opening={tree.opening.san}
+          line={path.map((n) => ({ san: n.san, key: n.id }))}
+          current={path.length}
+          onSelect={(i) => setAt(pathIds[i - 1] ?? ROOT_ID)}
+        />
+        {node.players.length > 0 && (
+          <p className="text-xs text-zinc-500">
+            {moveLabel(node.ply, node.san)} played by {node.players.map((p) => `u/${p}`).join(', ')}
+          </p>
+        )}
+      </Card>
+
+      <Card className="p-0 overflow-hidden">
+        <div className="px-4 pt-3 pb-2 flex justify-between text-xs text-zinc-500">
+          <span>
+            {kids.length
+              ? `${kids.length} move${kids.length === 1 ? '' : 's'} played here (${mover === 'w' ? 'White' : 'Black'} to move)`
+              : 'End of the line'}
+          </span>
+          {kids.length > 0 && <span>win % for the mover</span>}
+        </div>
+        {kids.length === 0 && node.end && (
+          <p className="px-4 pb-4 font-semibold text-zinc-900 dark:text-white">
+            {describeResult(node.end.result, node.end.reason)}
+          </p>
+        )}
+        {kids.map((k) => {
+          const rate = winRateFor(k.out, colorOfPly(k.ply));
+          const isMine = myChildIds.has(k.id);
+          const leadsToMine = !isMine && mine.moves.some((m) => isAncestorOrSelf(k.id, m.nodeId));
+          return (
+            <button
+              key={k.id}
+              type="button"
+              onClick={() => setAt(k.id)}
+              className={`w-full text-left border-t border-zinc-100 dark:border-zinc-800 px-4 py-2.5 flex items-center gap-3 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/60 ${
+                isMine ? 'bg-[#ff4500]/10' : ''
+              }`}
+            >
+              <div className="w-20 shrink-0">
+                <div className="font-mono font-bold text-zinc-900 dark:text-white">{k.san}</div>
+                <div className="text-[11px] text-zinc-500">
+                  {k.players.length} player{k.players.length === 1 ? '' : 's'}
+                </div>
+              </div>
+              <div className="flex-1 min-w-0 space-y-1">
+                <OutcomeBar out={k.out} />
+                <div className="text-[11px] text-zinc-500 truncate">
+                  {totalLines(k.out)} line{totalLines(k.out) === 1 ? '' : 's'}
+                  {k.end ? ` · ${describeResult(k.end.result, k.end.reason)}` : ''}
+                  {isMine ? ' · your move' : leadsToMine ? ' · leads to your move' : ''}
+                  {k.players.includes(me) && !isMine ? ' · you' : ''}
+                </div>
+              </div>
+              <div className="w-12 text-right font-bold tabular-nums text-zinc-900 dark:text-white">
+                {formatRate(rate)}
+              </div>
+            </button>
+          );
+        })}
+      </Card>
+    </div>
+  );
+};
+
+/** A day that is still running: only your own moves are visible. */
+const OpenDay = ({ mine, closesAt }: { mine: HistoryDay; closesAt: number }) => {
+  const now = useNow();
+  const [sel, setSel] = useState(0);
+  const m = mine.moves[sel];
+  const pos = useMemo(() => (m ? fenAt(mine.opening.san, m.nodeId).fen() : null), [m, mine]);
+  return (
+    <div className="space-y-3">
+      <Card className="text-sm text-zinc-600 dark:text-zinc-400">
+        The tree stays hidden until the day is over, in {formatDuration(closesAt - now)}. Until then you only see your
+        own moves.
+      </Card>
+      {!m && <Muted>You haven't played today yet.</Muted>}
+      {m && pos && (
+        <>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {mine.moves.map((x, i) => (
+              <button
+                key={x.nodeId}
+                type="button"
+                onClick={() => setSel(i)}
+                className={`shrink-0 rounded-full px-3 py-1 text-sm font-mono font-bold cursor-pointer ring-1 ${
+                  i === sel ? 'bg-[#ff4500] text-white ring-[#ff4500]' : 'bg-white dark:bg-zinc-900 ring-black/10 dark:ring-white/15'
+                }`}
+              >
+                {moveLabel(x.ply, x.san)}
+              </button>
+            ))}
+          </div>
+          <Board fen={pos} orientation={m.color} marked={{ from: m.uci.slice(0, 2), to: m.uci.slice(2, 4) }} />
+          <p className="text-center text-sm text-zinc-500">
+            You played <b className="font-mono text-[#ff4500]">{m.san}</b> from this position
+          </p>
+        </>
+      )}
+    </div>
+  );
+};
+
+const DayView = ({ day, me, onBack }: { day: ArchiveDay; me: string; onBack: () => void }) => {
+  const [mine, setMine] = useState<HistoryDay | null>(null);
+  const [tree, setTree] = useState<DayTreeResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [ply, setPly] = useState(0);
 
   useEffect(() => {
-    api.game(id).then(
-      (g) => {
-        setGame(g);
-        setPly(g.myMove?.ply ?? g.moves.length);
-      },
-      (e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load game')
-    );
-  }, [id]);
-
-  const fens = useMemo(() => {
-    if (!game) return [];
-    const c = new Chess();
-    const out = [c.fen()];
-    for (const m of game.moves) {
-      c.move(m.san);
-      out.push(c.fen());
-    }
-    return out;
-  }, [game]);
-
-  if (error) return <Card className="text-rose-600">{error}</Card>;
-  if (!game) return <Card className="text-center text-zinc-500 py-16">Loading game…</Card>;
-
-  const color = game.myMove?.color ?? 'w';
-  const cur = game.moves[ply - 1];
-  const mine = game.myMove;
-  const max = game.moves.length;
-  const pgn = toPgn(game);
+    const fail = (e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load');
+    api.myDay(day.day).then(setMine, fail);
+    if (day.closed) api.tree(day.day).then(setTree, fail);
+  }, [day]);
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <Btn kind="ghost" onClick={onBack}>
-          ← My moves
+        <Btn kind="ghost" className="!px-0" onClick={onBack}>
+          ← All days
         </Btn>
-        <span className="text-sm text-zinc-500">Game #{game.id.slice(1)}</span>
+        <span className="text-sm text-zinc-500">{formatDay(day.day)}</span>
       </div>
       <Card className="space-y-1">
-        <div className="font-bold text-zinc-900 dark:text-white">
-          {game.status === 'finished' ? describeEnd(game, mine?.color ?? null) : `In play · ${max} moves so far`}
+        <div className="font-bold text-zinc-900 dark:text-white">{day.opening.name}</div>
+        <div className="text-sm text-zinc-500">
+          {day.players} players · {day.moves} moves
+          {mine && mine.dayRate !== null ? ` · your day: ${formatRate(mine.dayRate)}` : ''}
         </div>
-        {mine && (
-          <div className="text-sm text-zinc-600 dark:text-zinc-400">
-            Your move: <b className="font-mono text-[#ff4500]">{moveLabel(mine.ply, mine.san)}</b> as{' '}
-            {mine.color === 'w' ? 'White' : 'Black'} · {timeAgo(mine.at)}
-          </div>
-        )}
       </Card>
-
-      <Board
-        fen={fens[ply] ?? game.fen}
-        orientation={color}
-        lastMove={cur ? { from: cur.uci.slice(0, 2), to: cur.uci.slice(2, 4) } : null}
-        marked={mine && ply === mine.ply ? { from: mine.uci.slice(0, 2), to: mine.uci.slice(2, 4) } : null}
-      />
-
-      <div className="flex items-center gap-1 justify-center">
-        <Btn kind="secondary" onClick={() => setPly(0)} disabled={ply === 0}>
-          ⏮
-        </Btn>
-        <Btn kind="secondary" onClick={() => setPly(Math.max(0, ply - 1))} disabled={ply === 0}>
-          ◀
-        </Btn>
-        {mine && (
-          <Btn kind="primary" onClick={() => setPly(mine.ply)}>
-            My move
-          </Btn>
-        )}
-        <Btn kind="secondary" onClick={() => setPly(Math.min(max, ply + 1))} disabled={ply === max}>
-          ▶
-        </Btn>
-        <Btn kind="secondary" onClick={() => setPly(max)} disabled={ply === max}>
-          ⏭
-        </Btn>
-      </div>
-      <p className="text-center text-xs text-zinc-500 h-4">
-        {cur ? `${moveLabel(cur.ply, cur.san)} by u/${cur.user}` : 'Starting position'}
-      </p>
-
-      <Card>
-        <MoveList moves={game.moves} current={ply} mine={mine?.ply ?? null} onSelect={setPly} />
-      </Card>
-
-      <div className="flex gap-2">
-        <Btn
-          kind="secondary"
-          className="flex-1"
-          onClick={() => openExternal(`https://lichess.org/analysis/standard/${(fens[ply] ?? game.fen).replace(/ /g, '_')}`)}
-        >
-          Analyze on Lichess
-        </Btn>
-        <Btn
-          kind="secondary"
-          className="flex-1"
-          onClick={() => {
-            navigator.clipboard.writeText(pgn).then(
-              () => toast('PGN copied — paste it at lichess.org/paste'),
-              () => toast('Could not copy PGN')
-            );
-          }}
-        >
-          Copy PGN
-        </Btn>
-      </div>
+      {error && <Card className="text-rose-600">{error}</Card>}
+      {!error && !mine && <Muted>Loading…</Muted>}
+      {mine && !day.closed && <OpenDay mine={mine} closesAt={Date.parse(`${day.day}T00:00:00Z`) + 86_400_000} />}
+      {mine && day.closed && (tree ? <Explorer tree={tree} mine={mine} me={me} /> : !error && <Muted>Loading tree…</Muted>)}
     </div>
   );
 };
 
-const HistoryTab = ({ toast }: { toast: (m: string) => void }) => {
-  const [entries, setEntries] = useState<HistoryEntry[] | null>(null);
-  const [cursor, setCursor] = useState<number | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
-  const [filter, setFilter] = useState<'all' | 'pending' | 'finished'>('all');
-
+const DaysTab = ({ me }: { me: string }) => {
+  const [days, setDays] = useState<ArchiveDay[] | null>(null);
+  const [open, setOpen] = useState<ArchiveDay | null>(null);
   useEffect(() => {
-    api.history().then(
-      (r) => {
-        setEntries(r.entries);
-        setCursor(r.nextCursor);
-      },
-      () => setEntries([])
-    );
+    api.days().then((r) => setDays(r.days), () => setDays([]));
   }, []);
 
-  if (open) return <GameViewer id={open} onBack={() => setOpen(null)} toast={toast} />;
-  if (!entries) return <Card className="text-center text-zinc-500 py-16">Loading your moves…</Card>;
-  if (!entries.length)
-    return <Card className="text-center text-zinc-500 py-12">You haven't played any moves yet.</Card>;
-
-  const shown = entries.filter((e) =>
-    filter === 'all' ? true : filter === 'pending' ? e.outcome === null : e.outcome !== null
-  );
-
+  if (open) return <DayView day={open} me={me} onBack={() => setOpen(null)} />;
+  if (!days) return <Muted>Loading days…</Muted>;
+  if (!days.length) return <Muted>No games yet. Be the first to play today!</Muted>;
   return (
     <div className="space-y-2">
-      <div className="flex gap-1">
-        {(['all', 'pending', 'finished'] as const).map((f) => (
-          <button
-            key={f}
-            type="button"
-            onClick={() => setFilter(f)}
-            className={`px-3 py-1 rounded-full text-sm cursor-pointer ${filter === f ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900' : 'text-zinc-600 dark:text-zinc-400'}`}
-          >
-            {f === 'all' ? 'All' : f === 'pending' ? 'In play' : 'Finished'}
-          </button>
-        ))}
-      </div>
-      {shown.map((e) => (
+      {days.map((d) => (
         <button
-          key={e.gameId}
+          key={d.day}
           type="button"
-          onClick={() => setOpen(e.gameId)}
+          onClick={() => setOpen(d)}
           className="w-full text-left rounded-xl bg-white dark:bg-zinc-900 ring-1 ring-black/5 dark:ring-white/10 p-3 flex items-center gap-3 cursor-pointer hover:ring-[#ff4500]/50"
         >
-          <ColorDot color={e.color} />
           <div className="flex-1 min-w-0">
-            <div className="font-mono font-bold text-zinc-900 dark:text-white">{moveLabel(e.ply, e.san)}</div>
-            <div className="text-xs text-zinc-500 truncate">
-              Game #{e.gameId.slice(1)} · {timeAgo(e.playedAt)} ·{' '}
-              {e.status === 'finished' ? `${e.result} after ${e.totalPlies} plies` : `${e.totalPlies} plies so far`}
+            <div className="font-semibold text-zinc-900 dark:text-white truncate">{d.opening.name}</div>
+            <div className="text-xs text-zinc-500">
+              {formatDay(d.day)} · {d.players} players · {d.moves} moves
+              {d.myMoves ? ` · you: ${d.myMoves}` : ''}
             </div>
           </div>
-          <OutcomeBadge outcome={e.outcome} />
+          <span
+            className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+              d.closed
+                ? 'bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200'
+                : 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300'
+            }`}
+          >
+            {d.closed ? 'View tree' : 'Today'}
+          </span>
         </button>
       ))}
-      {cursor !== null && (
-        <Btn
-          kind="secondary"
-          className="w-full"
-          onClick={() =>
-            void api.history(cursor).then((r) => {
-              setEntries([...entries, ...r.entries]);
-              setCursor(r.nextCursor);
-            })
-          }
-        >
-          Load more
-        </Btn>
-      )}
     </div>
   );
 };
@@ -531,11 +618,11 @@ const LeadersTab = ({ me }: { me: string }) => {
   useEffect(() => {
     void api.leaderboard().then(setData);
   }, []);
-  if (!data) return <Card className="text-center text-zinc-500 py-16">Loading…</Card>;
+  if (!data) return <Muted>Loading…</Muted>;
   return (
     <Card className="p-0 overflow-hidden">
       <p className="text-xs text-zinc-500 px-4 pt-3 pb-2">
-        Ranked by win rate · at least {data.minGames} finished games
+        Average branch win rate · at least {data.minMoves} scored moves
       </p>
       {data.entries.length === 0 && <p className="px-4 pb-4 text-sm text-zinc-500">Nobody qualifies yet.</p>}
       <table className="w-full text-sm">
@@ -547,9 +634,7 @@ const LeadersTab = ({ me }: { me: string }) => {
             >
               <td className="pl-4 pr-2 py-2 w-12 text-zinc-400 tabular-nums">{e.rank}</td>
               <td className="py-2 font-medium text-zinc-900 dark:text-zinc-100 truncate max-w-0 w-full">u/{e.username}</td>
-              <td className="py-2 px-2 text-xs text-zinc-500 tabular-nums whitespace-nowrap">
-                {e.wins}/{e.draws}/{e.losses}
-              </td>
+              <td className="py-2 px-2 text-xs text-zinc-500 tabular-nums whitespace-nowrap">{e.moves} moves</td>
               <td className="pr-4 py-2 text-right font-bold tabular-nums text-zinc-900 dark:text-white">
                 {formatRate(e.winRate)}
               </td>
@@ -578,27 +663,64 @@ const ToolsTab = ({ toast, onChange }: { toast: (m: string) => void; onChange: (
   return (
     <Card className="space-y-3">
       <h2 className="font-bold text-zinc-900 dark:text-white">Test data (moderators)</h2>
-      <p className="text-sm text-zinc-600 dark:text-zinc-400">
-        Seed fake games — you are dropped into about two thirds of them, so "My moves" and your win rate fill up. Bots
-        then keep playing open boards so you can watch games finish.
-      </p>
+      <ul className="text-sm text-zinc-600 dark:text-zinc-400 list-disc pl-5 space-y-1">
+        <li>
+          <b>Seed</b> plays 4 past days and part of today with fake players. Some moves are made in your name, so you
+          have a history, a win rate and a rank.
+        </li>
+        <li>
+          <b>Simulate</b> makes fake players move on today's tree.
+        </li>
+        <li>
+          <b>Advance day</b> moves this subreddit's game clock one day forward. Today closes and its tree is revealed.
+        </li>
+      </ul>
       <div className="flex flex-wrap gap-2">
-        <Btn disabled={busy} onClick={() => void run('Seeding', async () => {
-          const r = await api.seed();
-          return `Seeded ${r.games} games (${r.finished} finished)`;
-        })}>
-          Seed demo games
+        <Btn
+          disabled={busy}
+          onClick={() =>
+            void run('Seeding', async () => {
+              const r = await api.seed();
+              return `Seeded ${r.days} days with ${r.moves} moves`;
+            })
+          }
+        >
+          Seed demo data
         </Btn>
-        <Btn kind="secondary" disabled={busy} onClick={() => void run('Bots are thinking', async () => {
-          const r = await api.simulate(60);
-          return `Bots played ${r.played} moves · ${r.finished} games ended`;
-        })}>
-          Simulate 60 bot moves
+        <Btn
+          kind="secondary"
+          disabled={busy}
+          onClick={() =>
+            void run('Fake players are moving', async () => {
+              const r = await api.simulate(40);
+              return `Fake players made ${r.played} moves`;
+            })
+          }
+        >
+          Simulate 40 moves
         </Btn>
-        <Btn kind="ghost" disabled={busy} onClick={() => void run('Resetting', async () => {
-          const r = await api.reset();
-          return `Deleted ${r.games} games`;
-        })}>
+        <Btn
+          kind="secondary"
+          disabled={busy}
+          onClick={() =>
+            void run('Advancing', async () => {
+              const r = await api.advanceDay();
+              return `Now ${r.today}. Revealed: ${r.closed.join(', ') || 'nothing'}`;
+            })
+          }
+        >
+          Advance day
+        </Btn>
+        <Btn
+          kind="ghost"
+          disabled={busy}
+          onClick={() =>
+            void run('Resetting', async () => {
+              const r = await api.reset();
+              return `Deleted ${r.days} days`;
+            })
+          }
+        >
           Reset everything
         </Btn>
       </div>
@@ -618,7 +740,10 @@ export const App = () => {
   const [toastNode, toast] = useToast();
 
   const refreshMe = useCallback(() => {
-    api.me().then(setMe, (e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load'));
+    api.me().then((m) => {
+      clockSkew = m.now - Date.now();
+      setMe(m);
+    }, (e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load'));
   }, []);
   useEffect(refreshMe, [refreshMe]);
 
@@ -628,7 +753,7 @@ export const App = () => {
 
   const tabs: [Tab, string][] = [
     ['play', 'Play'],
-    ['history', 'My moves'],
+    ['days', 'Days'],
     ['leaders', 'Leaderboard'],
   ];
   if (me.isModerator) tabs.push(['tools', 'Test data']);
@@ -640,7 +765,10 @@ export const App = () => {
           <h1 className="text-xl font-black tracking-tight">
             Orbital <span className="text-[#ff4500]">Chess</span>
           </h1>
-          <span className="text-xs text-zinc-500">u/{me.username}{isLocal ? ' · local' : ''}</span>
+          <span className="text-xs text-zinc-500">
+            u/{me.username}
+            {isLocal ? ` · local · ${me.today}` : ''}
+          </span>
         </header>
         <StatsBar stats={me.stats} />
         <nav className="flex gap-1 bg-zinc-200/70 dark:bg-zinc-800/70 p-1 rounded-full">
@@ -657,7 +785,7 @@ export const App = () => {
         </nav>
         <main key={`${tab}-${epoch}`}>
           {tab === 'play' && <PlayTab onStats={(stats) => setMe({ ...me, stats })} toast={toast} />}
-          {tab === 'history' && <HistoryTab toast={toast} />}
+          {tab === 'days' && <DaysTab me={me.username} />}
           {tab === 'leaders' && <LeadersTab me={me.username} />}
           {tab === 'tools' && (
             <ToolsTab

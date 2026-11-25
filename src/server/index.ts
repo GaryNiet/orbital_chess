@@ -4,6 +4,7 @@ import { context, createServer, getServerPort, reddit, redis } from '@devvit/web
 import { createApi } from './routes/api.ts';
 import { menu } from './routes/menu.ts';
 import { triggers } from './routes/triggers.ts';
+import { scheduler } from './routes/scheduler.ts';
 
 const isModerator = async () => {
   try {
@@ -22,6 +23,7 @@ const internal = new Hono();
 
 internal.route('/menu', menu);
 internal.route('/triggers', triggers);
+internal.route('/scheduler', scheduler);
 
 app.route(
   '/api',

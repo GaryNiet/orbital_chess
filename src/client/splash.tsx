@@ -46,13 +46,13 @@ export const Splash = () => {
             Orbital <span className="text-[#ff4500]">Chess</span>
           </h1>
           <p className="text-sm text-zinc-600 dark:text-zinc-400 leading-snug">
-            One move per game, then the board orbits to the next player. Play as many boards as you like — chase the
-            best win rate.
+            One game a day, starting from a famous opening. Every player adds a move and the game branches into a tree.
+            Play as many positions as you like, but never two on the same line.
           </p>
           {s && (
             <p className="text-xs text-zinc-500">
-              {me?.username ?? context?.username}: {s.winRate === null ? 'no finished games yet' : `${Math.round(s.winRate)}% wins`}
-              {s.pending ? ` · ${s.pending} games in play` : ''}
+              {me?.username ?? context?.username}: {s.winRate === null ? 'no scored moves yet' : `${Math.round(s.winRate)}% win rate`}
+              {s.pending ? ` · ${s.pending} moves today` : ''}
             </p>
           )}
           <button

@@ -1,10 +1,11 @@
 import type {
-  GameView,
-  HistoryResponse,
+  ArchiveResponse,
+  DayTreeResponse,
+  HistoryDay,
   LeaderboardResponse,
   MeResponse,
   MoveResponse,
-  NextGameResponse,
+  NextResponse,
 } from '../shared/api';
 
 export class ApiError extends Error {}
@@ -28,13 +29,14 @@ const post = <T,>(path: string, body: unknown = {}) =>
 
 export const api = {
   me: () => call<MeResponse>('/me'),
-  next: (skip = false) => post<NextGameResponse>('/next', { skip }),
-  move: (gameId: string, ply: number, uci: string) =>
-    post<MoveResponse>('/move', { gameId, ply, uci }),
-  history: (cursor = 0) => call<HistoryResponse>(`/history?cursor=${cursor}`),
-  game: (id: string) => call<GameView>(`/game/${encodeURIComponent(id)}`),
+  next: (skip = false) => post<NextResponse>('/next', { skip }),
+  move: (day: string, nodeId: string, uci: string) => post<MoveResponse>('/move', { day, nodeId, uci }),
+  days: () => call<ArchiveResponse>('/days'),
+  myDay: (day: string) => call<HistoryDay>(`/day/${day}/mine`),
+  tree: (day: string) => call<DayTreeResponse>(`/day/${day}/tree`),
   leaderboard: () => call<LeaderboardResponse>('/leaderboard'),
-  seed: () => post<{ games: number; finished: number; players: number }>('/dev/seed'),
-  simulate: (count: number) => post<{ played: number; finished: number }>('/dev/simulate', { count }),
-  reset: () => post<{ games: number; users: number }>('/dev/reset'),
+  seed: () => post<{ days: number; moves: number }>('/dev/seed'),
+  simulate: (count: number) => post<{ played: number }>('/dev/simulate', { count }),
+  advanceDay: () => post<{ today: string; closed: string[] }>('/dev/advance-day'),
+  reset: () => post<{ days: number; users: number }>('/dev/reset'),
 };

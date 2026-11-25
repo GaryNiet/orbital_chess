@@ -1,36 +1,41 @@
 # Orbital Chess
 
-A Reddit game built with [Devvit Web](https://developers.reddit.com/docs). It's chess, but you get exactly **one move per game**. Then the board goes to the next player. Play as many boards as you like and try to get the highest win rate.
+A daily, crowd-played chess game for Reddit, built with [Devvit Web](https://developers.reddit.com/docs).
+
+There's **one game per day**. It starts from the final position of a well-known opening (the Najdorf, the Ruy Lopez, the King's Indian, …). Players are handed positions from the game and each makes one move. The same position can be handed to several people. When they play different moves, the game branches, so by the end of the day it has grown into a tree of lines.
 
 ## Rules
 
-- When you open the game you're given a board that's waiting for a move. You play whichever side is to move.
-- You can move only once in any game. After you move, the board goes to someone else.
-- Your win rate only changes when a game you played in **ends**. Until then the move counts as "waiting".
-  - Win rate = wins ÷ finished games. Draws count as a finished game that isn't a win.
-- A game ends by checkmate, stalemate, insufficient material, threefold repetition, the 50-move rule, or after 200 plies (a draw).
-- **My moves** lists every game you played in. You can open any of them to replay it, jump to your move, analyze the position on Lichess or copy the PGN.
-- **Leaderboard** ranks players by win rate. You need at least 5 finished games to appear on it.
+- You can play as many positions per day as you like, but **never two on the same path**. A position is only offered to you if none of your earlier moves that day is above it or below it in the tree.
+- Two players who make the same move from the same position share one branch.
+- A position stays open until 3 moves have been played from it. Fresh positions (where nobody has moved yet) are offered most often, deeper ones a bit more. Already-played positions are offered too, so the tree keeps branching.
+- Reloading returns the same position for 15 minutes, so you can't reroll until you get an easy one. **Skip** gives you another position on purpose.
+- The tree stays hidden while the day runs. During the day you only see your own moves.
 
-### Fairness
-- A board is reserved for you for 3 minutes, and reloading gives you the **same** board. You can't reroll until you get a position you like.
-- You can **Skip** a board on purpose. This hands you a different one.
-- The boards that have waited longest are handed out first, so every game keeps moving.
-- Each ply is claimed atomically (`HSETNX`), so two players can never both make the same move number.
+### Scoring (at midnight UTC)
+
+1. Every line (leaf of the tree) gets a result. Lines that ended by checkmate, stalemate, insufficient material, threefold repetition or the 50-move rule keep that result. Lines still running at midnight are **decided on material**: a side 3 or more points ahead (P=1, N=B=3, R=5, Q=9) wins, otherwise it's a draw. The rule is `adjudicate()` in `src/server/core/game.ts`.
+2. Results are added up the tree. Each move shows the combined results of every line below it (white wins / draws / black wins) and the **win rate for the side that played it**.
+3. Your score for a move is that branch win rate. Your overall win rate is the average over all your scored moves. The leaderboard needs at least 5 scored moves.
+
+Once a day is over, **Days → View tree** opens an explorer for it. You can walk the whole tree, see every move with its player count and branch win rate, and jump straight to your own moves (marked "your move", with "leads to your move" on the branches above them).
 
 ## Project layout
 
 ```
-src/shared/api.ts           request/response types shared by client and server
-src/server/core/game.ts     game logic: matchmaking, move validation (chess.js), game end, stats, leaderboard
-src/server/core/bots.ts     fake players: a tiny 1-ply engine, demo-data seeder, bot simulation, reset
-src/server/core/store.ts    the Redis subset we use + an in-memory implementation for tests/local mode
+src/shared/api.ts           shared types + tree helpers (node ids encode the path: "r.e2e4.c7c5")
+src/shared/openings.ts      opening list + which opening is used on which day
+src/server/core/game.ts     daily tree: serving positions, path rule, moves, closing/scoring a day, stats
+src/server/core/bots.ts     fake players (random legal moves), demo-data seeder, simulation, reset
+src/server/core/store.ts    the Redis subset we use + an in-memory version for tests/local mode
 src/server/routes/api.ts    Hono routes (/api/*), independent of Devvit
-src/server/index.ts         Devvit wiring (redis, reddit user, moderator check)
-src/client/game.tsx         expanded view: Play / My moves / Leaderboard / Test data
+src/server/routes/scheduler.ts  00:01 UTC job that closes and scores the previous day
+src/client/game.tsx         expanded view: Play / Days (tree explorer) / Leaderboard / Test data
 src/client/splash.tsx       inline feed view (kept light, so no chess.js)
 tools/local/                run the whole app in a normal browser, no Reddit needed
 ```
+
+Days are closed by the scheduled job in `devvit.json`. As a backup, any API request also closes days that have already ended, and closing the same day twice does nothing.
 
 ## Running it
 
@@ -44,7 +49,7 @@ npm run dev:local          # http://localhost:5173/game.html  (add ?user=bob to 
 npm run login
 npm run dev                # devvit playtest
 
-npm run test:unit          # game-logic tests
+npm run test:unit
 npm run test:types && npm run lint
 ```
 
@@ -54,21 +59,9 @@ As a moderator you can use these actions, from the subreddit's `…` menu or fro
 
 | Action | What it does |
 | --- | --- |
-| Seed demo data | Creates 24 fake games with about 240 fake players. You're added to about two thirds of them, so *My moves*, your win rate and the leaderboard fill up straight away. |
-| Simulate bot moves | Fake players move on open boards (boards a human has reserved are skipped). Use it to watch your waiting games finish and your win rate change. |
-| Reset all data | Deletes every game and every stat. |
+| Seed demo data | Fake players play 4 past days plus part of today, then the past days are closed and scored. Some of the moves are made in your name, so you have a history, a win rate and a rank. |
+| Simulate bot moves | Fake players make moves on today's tree. |
+| Advance to next day | Moves the subreddit's game clock forward one day. Today closes, its tree is revealed and a new opening starts. This lets you test the midnight reveal without waiting. |
+| Reset all data | Deletes every day, move and stat (and resets the clock). |
 
-In local mode the store is seeded automatically for the user `you`.
-
-## Chess engines
-
-Moves are validated by **[chess.js](https://github.com/jhlywa/chess.js)** (BSD-2), on both the server and the client. It isn't an engine.
-
-There are free engine options:
-
-1. **Lichess (already wired in).** *Analyze on Lichess* opens the position you're looking at in Lichess's free Stockfish analysis board. *Copy PGN* copies the whole game for import at lichess.org/paste. Devvit shows a confirmation before it opens an external link.
-2. **Stockfish in the browser:** the [`stockfish`](https://www.npmjs.com/package/stockfish) npm package (Stockfish compiled to WebAssembly). It runs on the player's device at no cost. The "lite single-threaded" build is about 7 MB, so load it only in the expanded view (never in the splash). Note that Stockfish is **GPL-3.0**: if you ship it in the app bundle, the app has to be distributed under GPL terms too.
-3. **Lichess cloud-eval API** (`GET https://lichess.org/api/cloud-eval?fen=…`): free precomputed evaluations for common positions. Calling it from the Devvit server means adding `lichess.org` to the HTTP allow-list in `devvit.json`, and Reddit has to approve that domain.
-4. **A homemade engine:** `src/server/core/bots.ts` already has a tiny one-ply evaluator for the fake players. A small alpha-beta search on top of chess.js would give stronger bots, still MIT/BSD and with no dependency.
-
-Some ways an engine could be used: a "move quality" score next to each entry in *My moves* (best, good, inaccuracy, blunder), an eval bar in the replay viewer, or bots that keep quiet boards moving.
+Fake players don't use any engine: they pick a random legal move, with a slight preference for captures.

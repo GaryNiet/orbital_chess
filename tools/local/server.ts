@@ -13,8 +13,8 @@ import { seedDemoData } from '../../src/server/core/bots.ts';
 export const startApiServer = async (port: number) => {
   const store = new MemoryStore();
   const t = Date.now();
-  const r = await seedDemoData(store, { realUser: 'you', games: 24, seed: 42 });
-  console.log(`[local] seeded ${r.games} games (${r.finished} finished) in ${Date.now() - t}ms`);
+  const r = await seedDemoData(store, { realUser: 'you', seed: 42 });
+  console.log(`[local] seeded ${r.days} days, ${r.moves} moves in ${Date.now() - t}ms`);
 
   let currentUser = 'you';
   const app = new Hono();

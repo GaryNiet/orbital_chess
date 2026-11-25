@@ -28,21 +28,28 @@
       },
       {
         "label": "Orbital Chess: seed demo data",
-        "description": "Add fake games and players (includes you in some games)",
+        "description": "Add fake past days and moves (includes you)",
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/seed"
       },
       {
         "label": "Orbital Chess: simulate bot moves",
-        "description": "Fake players make 40 moves on open boards",
+        "description": "Fake players make 40 moves on today's tree",
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/simulate"
       },
       {
+        "label": "Orbital Chess: advance to next day (test)",
+        "description": "Shift the game clock one day forward and reveal today's tree",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/advance-day"
+      },
+      {
         "label": "Orbital Chess: reset all data",
-        "description": "Delete every game and stat",
+        "description": "Delete every day, move and stat",
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/reset"
@@ -55,5 +62,13 @@
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build"
+  },
+  "scheduler": {
+    "tasks": {
+      "close-day": {
+        "endpoint": "/internal/scheduler/close-day",
+        "cron": "1 0 * * *"
+      }
+    }
   }
 }
